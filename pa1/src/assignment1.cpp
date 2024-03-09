@@ -59,6 +59,9 @@ using namespace std;
 #define CMD_SIZE 100
 #define BUFFER_SIZE 256
 
+
+//we referred to beej guide for socket programming core functionalities
+//reference: https://beej.us/guide/bgnet/html/split/index.html
 //to store all the required information related to the client
 struct client_details{
 	string ip;
@@ -142,6 +145,7 @@ class Server{
 				if (STDIN_FILENO > max_sd) {
 					max_sd = STDIN_FILENO; // Ensure max_sd tracks the highest file descriptor
 				}
+				// reference: https://beej.us/guide/bgnet/html/split/slightly-advanced-techniques.html#select
 				//waiting for an activity on one of the sockets, timeout is NULL.
 				activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
 				if((activity < 0) && (errno!=EINTR)) {
@@ -398,21 +402,18 @@ class Client{
 			struct sockaddr_in server_addr;
 			string ip_address;
 			char hostname[1024];
-			if (gethostname(hostname, 1024) < 0)
-			{
-				// cout<<"gethostname error"<<endl;
-			}
+			gethostname(hostname, 1024);
 			struct hostent *ht;
-			if ((ht = gethostbyname(hostname)) == NULL)
+			(ht = gethostbyname(hostname));
+			if ( ht == NULL)
 			{
-				//cout<<"hostname error" << endl;
+				//hostname error
 			}
 			struct in_addr **addr_list = (struct in_addr **)ht->h_addr_list;
 			for (int i = 0; addr_list[i] != NULL; ++i)
 			{
 				ip_address = inet_ntoa(*addr_list[i]);
 			}
-
 			// Create socket
 			client_socket = socket(AF_INET, SOCK_STREAM, 0);
 			if (client_socket == -1) {
