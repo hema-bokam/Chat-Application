@@ -95,8 +95,7 @@ class Server{
 	    sockaddr_in server_address;
 		int server_socket;
 		vector<client_details> clients; //stores all information of connected clients
-		//char ip_buffer[INET_ADDRSTRLEN];
-		char* server_ip_address;
+		char ip_buffer[INET_ADDRSTRLEN];
 
 		Server(int port_num){
 			server_port_num = port_num;
@@ -139,9 +138,9 @@ class Server{
 				cerr << "Failed to get host info for " << server_hostname << endl;
 				return; 
 			}
-			server_ip_address = inet_ntoa(*(struct in_addr *)host_info->h_addr_list[0]);
-			//cout<<"server hostname: "<<server_hostname << endl;
-			//cout << "server ip address: "<<server_ip_address<<endl;
+			string server_ip_address = inet_ntoa(*(struct in_addr *)host_info->h_addr_list[0]);
+			// cout<<"server hostname: "<<hostname << endl;
+			// cout << "server ip address: "<<server_ip_address<<endl;
 			int addressLen = sizeof(server_address);
 			
 			while(true) {
@@ -178,31 +177,7 @@ class Server{
 					}
 					char client_hostname[NI_MAXHOST];
 					int res = getnameinfo((struct sockaddr*)&client_address, sizeof(client_address),client_hostname, NI_MAXHOST, NULL, 0, 0);
-					//check if loggedin client is trying to login again
-					// bool isClientExist = false;
-					// for(auto &client : clients){
-					// 	if(client.ip == inet_ntoa(client_address.sin_addr)){
-					// 		isClientExist = true;
-					// 		client.socket_fd = client_socket;
-					// 		client.login_state = true;
-					// 		break;
-					// 	}
-					// }
-					// if(!isClientExist){
-					// 	//cout << "New client"<<endl;
-					// 	if (res == 0) {
-					// 		//cout << "New client"<<endl;
-					// 		//store client information
-					// 		client_details client;
-					// 		client.host_name = client_hostname;
-					// 		client.ip = inet_ntoa(client_address.sin_addr);
-					// 		client.port_num = ntohs(client_address.sin_port);
-					// 		client.socket_fd = client_socket;	
-					// 		client.login_state = true;
-					// 		//store in the vector. It will help retrive all connected clients to the given server
-					// 		clients.push_back(client);
-					// 	}
-					// }
+					
 					if (res == 0) {
 						//store client information
 						client_details client;
@@ -220,18 +195,11 @@ class Server{
 					if(client.socket_fd >= 0){
 						if (FD_ISSET(client.socket_fd, &readfds)) {
 							handleClientMessage(client.socket_fd);
-							// if (!handleClientMessage(client.socket_fd)) {
-							// 	// If handleClientMessage returns false, it means the client disconnected or logged out or exited
-							// 	close(client.socket_fd); //close the client socket
-							// 	client.socket_fd = -1; // Mark as closed
-							// }
+							
 						}
 					}
 				}
-				//remove clients that are marked as closed.
-				// clients.erase(std::remove_if(clients.begin(), clients.end(), 
-				// 							[](const client_details& c) { return c.socket_fd == -1; }), clients.end());
-				//handle input operations
+			
 				if(FD_ISSET(STDIN_FILENO, &readfds)){
 						memset(&command, 0, sizeof(command));
 						ssize_t readBytes = read(STDIN_FILENO, command, sizeof(command) - 1); // read command
@@ -252,7 +220,7 @@ class Server{
 							cse4589_print_and_log("[%s:END]\n", command);
 						}else if(strncmp(command, "BLOCKED", 7) == 0){
 							stringstream ss(command);
-							string command_str;
+							//string command_str;
 							vector<string> tokens;
 
 							// Tokenize the input
@@ -287,21 +255,19 @@ class Server{
 			stringstream ss;
 			ss << command << " ";
 			for (const auto& client : clients) {
-				//if(client.login_state){
+				if(client.login_state){
 					ss << client.ip << "," 
 					<< client.port_num << ","
 					<< client.host_name << ","
 					<< (client.login_state ? "true" : "false") << ","
 					<< (client.socket_fd) <<  ";";
-				//}
+				}
 			}
 			//cout << "Serialized client info string: "<<ss.str()<<endl;
 			return ss.str();
 		}
 
-		//It will handle 2 client messages, i.e., LOGOUT and SEND_CLIENTS_INFO
-		//If clients sends "SEND_CLIENTS_INFO" message we are directly sending required information from this method
-		//If client send "LOGOUT" message to the server, then we return boolean value. We will handle this case in server loop
+		//It will handle all client messages
 		void handleClientMessage(int client_socket) {
 			char buffer[1024];
 			memset(buffer, 0, sizeof(buffer));
@@ -310,42 +276,36 @@ class Server{
 				return;
 			}
 			//cout << "Buffer message before: "<<buffer<<endl;
-			char* token = strtok(buffer, " ");
-			char command_str[100];
-			if (token != nullptr) {
-                strcpy(command_str, token);
+			stringstream ss;
+            ss << buffer;
+            string command_str;
+            vector<string> tokens;
+			while (ss >> command_str) {
+				tokens.push_back(command_str);
+				if (command_str == "SEND") {
+					break;
+				}
 			}
+			if(tokens.empty()) return;
 			//cout << "Command is: "<<command_str<<endl;
 			//cout << "Buffer message: "<<buffer<<endl;
 			// Check if the message is a logout request
-			if(strcmp(command_str, "LOGIN") == 0){
+			if(tokens[0] == "LOGIN"){
+				for(auto &client : clients){
+					if(client.socket_fd == client_socket){
+						client.login_state = true;
+						break;
+					}
+				}
 				//cout << "Inside handle client login "<<endl;
-				string data_to_transfer = serialize_clients_data(command_str);
+				string data_to_transfer = serialize_clients_data(tokens[0]);
 				//cout << "After serialization data: "<<data_to_transfer<<endl;
 				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
 				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
 				send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
-				// for(auto &client : clients){
-				// 	if(client.socket_fd == client_socket){
-				// 		//check if there are any buffered messages for the client
-				// 		if(client.buffer_messages_map.find(client.ip) != client.buffer_messages_map.end()){
-				// 			for(auto &buffer_message : client.buffer_messages_map[client.ip]){
-				// 				char command[] = "RELAYED";									
-				// 				cse4589_print_and_log("[%s:SUCCESS]\n", command);
-				// 				cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", buffer_message.source_ip.c_str(), buffer_message.destination_ip.c_str(), buffer_message.message.c_str());
-				// 				cse4589_print_and_log("[%s:END]\n", command);
-				// 				string data_to_transfer = "SEND " + buffer_message.source_ip + " " + buffer_message.message;
-				// 				// cout << "After serialization data: "<<data_to_transfer<<endl;
-				// 				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
-				// 				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
-				// 				send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
-				// 			}
-				// 			client.buffer_messages_map.erase(client.ip);
-				// 		}
-				// 	}
-				//}
+				
 				return;
-			}else if(strcmp(command_str, "EXIT") == 0){
+			}else if(tokens[0] == "EXIT"){
 				for(auto &client : clients){
 					if(client.socket_fd == client_socket){
 						client.socket_fd = -1;
@@ -357,42 +317,29 @@ class Server{
 											[](const client_details& c) { return c.socket_fd == -1; }), clients.end());
 				//cout << "After exit clients size: "<<clients.size()<<endl;
 				return; // Indicates that the client wants to exit
-			}else if(strcmp(command_str, "LOGOUT") == 0){
+			}else if(tokens[0] == "LOGOUT"){
 				//cout << "Inside handle client logout"<<endl;
 				for(auto &client : clients){
 					if(client.socket_fd == client_socket){
 						client.login_state = false;
-						// close(client_socket);
-						// client.socket_fd = -1;
-						// client_socket = -1;
 						return;
 					}
 				}
-			}else if(strcmp(command_str, "REFRESH") == 0){
-				string data_to_transfer = serialize_clients_data(command_str);
+			}else if(tokens[0] == "REFRESH"){
+				string data_to_transfer = serialize_clients_data(tokens[0]);
 				//cout << "After serialization data: "<<data_to_transfer<<endl;
 				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
 				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
 				send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
 			
-			}else if(strcmp(command_str, "SEND") == 0){
-				//cout << "Inside handle client: send"<<endl;
-               // char* token =  strtok(buffer, " "); 
-                char source_ip[INET_ADDRSTRLEN];
-                char destination_ip[INET_ADDRSTRLEN];
-                char message[300];
-				token = strtok(nullptr, " ");
-                if (token != nullptr) {
-                    strcpy(source_ip, token);
-                    token = strtok(nullptr, " ");
-                    if(token != nullptr){
-                        strcpy(destination_ip, token);
-                        token = strtok(nullptr, "");
-                        if(token != nullptr){
-                            strcpy(message, token);
-                        }
-                    }
-                }
+			}else if(tokens[0] == "SEND"){
+                string source_ip;
+                string destination_ip;
+                string message;
+                ss>>source_ip;
+                ss>>destination_ip;
+                getline(ss, message);
+                message = message.substr(1);
 				// cout << "message: "<<message<<endl;
 				// cout <<"source ip: "<<source_ip<<endl;
 				// cout<<"destination ip: "<<destination_ip<<endl;
@@ -405,50 +352,57 @@ class Server{
 				auto receiver_client = std::find_if(clients.begin(), clients.end(), [destination_ip](const client_details& client) {
 					return client.ip == destination_ip && client.login_state;
 				});
+				string response_to_client;
 				if(receiver_client == clients.end()){
+					//response_to_client = "SEND ERROR";
+				}
+				else{
+					bool isBlocked = false;
+					
+					if(receiver_client->blocked_clients_set.find(source_ip) != receiver_client->blocked_clients_set.end()){
+						isBlocked = true;
+					}
+					
+					if(!isBlocked){
+						if(receiver_client->login_state){
+							char command[] = "RELAYED";
+							cse4589_print_and_log("[%s:SUCCESS]\n", command);
+							cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", source_ip.c_str(), destination_ip.c_str(), message.c_str());
+							cse4589_print_and_log("[%s:END]\n", command);
+							string data_to_transfer = "RECEIVE " + string(source_ip) + " " + message;
+							// cout << "After serialization data: "<<data_to_transfer<<endl;
+							uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+							send(receiver_client->socket_fd, &data_length, sizeof(data_length), 0); // Send the length first
+							send(receiver_client->socket_fd, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+						}
+						else{
+							buffer_message_info buffer_message;
+							buffer_message.source_ip = source_ip;
+							buffer_message.destination_ip = destination_ip;
+							buffer_message.message = message;
+							receiver_client->buffer_messages_map[destination_ip].push_back(buffer_message);
+							//cout << "Buffered messages is: "<<receiver_client->buffer_messages_map[destination_ip].size()<<endl;
+						}
+						//cout << "sender client msgs sent: "<<sender_client->msgs_sent<<endl;
+						//cout << "receiver client msgs received: "<<receiver_client->msgs_recv<<endl;
+						receiver_client->msgs_recv++;
+					}
+					sender_client->msgs_sent++;
+					response_to_client = "SEND SUCCESS";
+					uint32_t data_length = htonl(response_to_client.length()); // Ensure network byte order
+					send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+					send(client_socket, response_to_client.c_str(), response_to_client.length(), 0);
 					return;
 				}
-				// if(sender_client != clients.end()){
-				// 	send error
-				// }
-				bool isBlocked = false;
 				
-				if(receiver_client->blocked_clients_set.find(source_ip) != receiver_client->blocked_clients_set.end()){
-					isBlocked = true;
-                }
-				if(!isBlocked){
-					if(receiver_client->login_state){
-						char command[] = "RELAYED";
-						cse4589_print_and_log("[%s:SUCCESS]\n", command);
-						cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", source_ip, destination_ip, message);
-						cse4589_print_and_log("[%s:END]\n", command);
-						string data_to_transfer = "SEND " + string(source_ip) + " " + message;
-						// cout << "After serialization data: "<<data_to_transfer<<endl;
-						uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
-						send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
-						send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
-					}
-					else{
-						buffer_message_info buffer_message;
-						buffer_message.source_ip = source_ip;
-						buffer_message.destination_ip = destination_ip;
-						buffer_message.message = message;
-						receiver_client->buffer_messages_map[destination_ip].push_back(buffer_message);
-						//cout << "Buffered messages size: "<<client.buffer_messages_map[destination_ip].size()<<endl;
-					}
-                }
-            }else if((strcmp(command_str, "BLOCK") == 0) || (strcmp(command_str, "UNBLOCK") == 0) || (strcmp(command_str, "BLOCKED") == 0)){
-                char client_ip[INET_ADDRSTRLEN];
-				token = strtok(nullptr, "");
-                if (token != nullptr) {
-                    strcpy(client_ip, token);
-				}
+            }else if((tokens[0] == "BLOCK") || (tokens[0] == "UNBLOCK")){
+                string client_ip = tokens[1];
 				//cout << "Client ip to block: "<<client_ip <<endl;
 				auto sender_client = std::find_if(clients.begin(), clients.end(), [client_socket](const client_details& client) {
 					return client.socket_fd == client_socket;
 				});
 				string data_to_transfer;
-				if(strcmp(command_str, "BLOCK") == 0){
+				if(tokens[0] == "BLOCK"){
 					if(sender_client->blocked_clients_set.find(client_ip) != sender_client->blocked_clients_set.end()){
 						//sender_client->socket_fd == client_socket
 						//already blocked
@@ -460,7 +414,7 @@ class Server{
 						data_to_transfer = "BLOCK SUCCESS";
 					}
 				}
-				else if(strcmp(command_str, "UNBLOCK") == 0){
+				else if(tokens[0] == "UNBLOCK"){
 					if(sender_client->blocked_clients_set.find(client_ip) == sender_client->blocked_clients_set.end()){
 						//sender_client->socket_fd == client_socket
 						//already blocked
@@ -524,42 +478,42 @@ class Server{
 		}
 
 		void print_server_ip(){
-			// int udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-    		// if (udp_socket < 0) {
-        	// 	std::cerr << "Failed to create socket" << std::endl;
-    		// }
-			// // Google's public DNS server address (8.8.8.8) 
-			// struct sockaddr_in external_address;
-			// memset(&external_address, 0, sizeof(external_address));
-			// external_address.sin_family = AF_INET;
-			// external_address.sin_addr.s_addr = inet_addr("8.8.8.8");
-			// external_address.sin_port = htons(53);
-			// // Connect to the public endpoint
-			// int err = connect(udp_socket, (const struct sockaddr*)&external_address, sizeof(external_address));
-			// if (err < 0) {
-			// 	cerr << "Failed to connect" <<endl;
-			// 	close(udp_socket);
-			// 	return;
-			// }
-			// // Get the local endpoint/IP address of the socket
-			// struct sockaddr_in local_address;
-			// socklen_t addr_len = sizeof(local_address);
-			// err = getsockname(udp_socket, (struct sockaddr*)&local_address, &addr_len);
-			// if (err < 0) {
-			// 	cerr << "Failed : local address" << endl;
-			// 	close(udp_socket);
-			// 	return;
-			// }
-			// // Convert the IP to a string and close the socket
-			// if (inet_ntop(AF_INET, &local_address.sin_addr, ip_buffer, sizeof(ip_buffer)) == NULL) {
-			// 	cerr << "Failed to convert IP address" << endl;
-			// 	close(udp_socket);
-			// 	return;  
-			// }
-			// close(udp_socket);
+			int udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    		if (udp_socket < 0) {
+        		std::cerr << "Failed to create socket" << std::endl;
+    		}
+			// Google's public DNS server address (8.8.8.8) 
+			struct sockaddr_in external_address;
+			memset(&external_address, 0, sizeof(external_address));
+			external_address.sin_family = AF_INET;
+			external_address.sin_addr.s_addr = inet_addr("8.8.8.8");
+			external_address.sin_port = htons(53);
+			// Connect to the public endpoint
+			int err = connect(udp_socket, (const struct sockaddr*)&external_address, sizeof(external_address));
+			if (err < 0) {
+				cerr << "Failed to connect" <<endl;
+				close(udp_socket);
+				return;
+			}
+			// Get the local endpoint/IP address of the socket
+			struct sockaddr_in local_address;
+			socklen_t addr_len = sizeof(local_address);
+			err = getsockname(udp_socket, (struct sockaddr*)&local_address, &addr_len);
+			if (err < 0) {
+				cerr << "Failed : local address" << endl;
+				close(udp_socket);
+				return;
+			}
+			// Convert the IP to a string and close the socket
+			if (inet_ntop(AF_INET, &local_address.sin_addr, ip_buffer, sizeof(ip_buffer)) == NULL) {
+				cerr << "Failed to convert IP address" << endl;
+				close(udp_socket);
+				return;  
+			}
+			close(udp_socket);
 			char command_str[] = "IP";
 			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
-			cse4589_print_and_log("IP:%s\n", server_ip_address);
+			cse4589_print_and_log("IP:%s\n", ip_buffer);
 			cse4589_print_and_log("[%s:END]\n", command_str);
 			return;
 		}
@@ -569,8 +523,12 @@ class Server{
 			std::sort(clients.begin(), clients.end(), [](const client_details& c1, const client_details& c2) {
         	return c1.port_num < c2.port_num;
 			});
+			int count = 1;
 			for (int i=0; i<clients.size(); i++) {
-				cse4589_print_and_log("%-5d%-35s%-20s%-8d\n", i+1, clients[i].host_name.c_str(), clients[i].ip.c_str(), clients[i].port_num);
+				if(clients[i].login_state){
+					cse4589_print_and_log("%-5d%-35s%-20s%-8d\n", count, clients[i].host_name.c_str(), clients[i].ip.c_str(), clients[i].port_num);
+					count++;
+				}
 			}
 		}
 };
@@ -583,14 +541,16 @@ class Client{
 		socklen_t client_address_Len = sizeof(client_address);
 		char ip_buffer[INET_ADDRSTRLEN];
 		vector<client_details> clients;
-		char *ip_addr;
+		char* ip_addr;
 	public:
 		Client(int port_num){
-			//cout << "Inside client constructor"<<endl;
 			client_port_num = port_num;
 			client_socket = -1;
+			char command[300];
+			fd_set readfds;
 			struct hostent *host_entry;
 			char hostname[1024];
+			
 			if (gethostname(hostname, sizeof(hostname)) == -1){
 				//cout << "error"<<endl;
 				cerr << "Cannot retrieve host name: " << hostname << endl;
@@ -600,9 +560,6 @@ class Client{
 				cerr << "Cannot retrieve host entry" << endl;
 		    }
 			ip_addr = inet_ntoa(*((struct in_addr *)host_entry->h_addr_list[0]));
-			// cout << "Host Name: " << hostname << " IP Address: " << ip_addr << endl;
-			char command[300];
-			fd_set readfds;
 			while(true){
 				FD_ZERO(&readfds);
 				FD_SET(STDIN_FILENO, &readfds);
@@ -634,9 +591,11 @@ class Client{
 			string command;
 			vector<string> tokens;
 
-			// Tokenize the input
 			while (ss >> command) {
 				tokens.push_back(command);
+				if (tokens[0] == "SEND") {
+					break;
+				}
 			}
 
 			if (tokens.empty()) return;
@@ -675,18 +634,27 @@ class Client{
 					cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
 				}
 			}else if(tokens[0] == "SEND"){
-				std::string message;
-				for(size_t i = 2; i < tokens.size(); ++i) {
-					if(i != 2) message += " "; 
-					message += tokens[i];
-				}
+
 				try{
-					if(!is_valid_ip_address(tokens[1])){
-						//throw exception when IP address is in invalid format
+					string ip_address;
+					ss >> ip_address;
+					if (ip_address.empty()) { // Extract the IP address
+						throw invalid_argument("Missing IP address");
+					}
+					if(!is_valid_ip_address(ip_address)){
 						throw invalid_argument("Invalid IP address");
 					}
+					string message;
+					getline(ss, message); // The rest of the line is the message
+					if (message.empty()) {
+						throw invalid_argument("Missing message");
+					}
+					// Remove leading space from the message
+					message = message.substr(1);
+					//cout << "send to ip: "<<ip_address<<endl;
+					//cout << "message: "<<message<<endl;
 					//send message to the corresponding client
-					send_message(tokens[1], message);
+					send_message(ip_address, message);
 					
 				}catch(const invalid_argument& exception){
 					cse4589_print_and_log("[%s:ERROR]\n",tokens[0].c_str());
@@ -712,6 +680,7 @@ class Client{
 				}
 			}
 		}
+				
 
 		void receive_messages_from_server(){
 		//	cout << "Inside receive messages from server"<<endl;
@@ -739,48 +708,52 @@ class Client{
 					char data[1024];
 					memset(data, 0, sizeof(data));
 					if (recv(client_socket, data, data_length, 0) > 0) {
-						char* token =  strtok(data, " "); 
-						char command_str[100];
-						char content[1024];
-						if (token != nullptr) {		
-							strcpy(command_str, token);
-							token = strtok(nullptr, ""); 
-							if (token != nullptr) {
-								strcpy(content, token);
-							}
-						}
+                        stringstream ss;
+                        ss << data;
+                        vector<string> tokens;
+                        string command_str;
+                        while (ss >> command_str) {
+                            tokens.push_back(command_str);
+                            if(command_str == "RECEIVE"){
+                                break;
+                            }
+                        }
+                        if(tokens.empty()) return;
 						//cout << "Command is: "<<command_str<<endl;
 						//cout << "Content is: "<<content <<endl;
-						if(strcmp(command_str, "REFRESH") == 0){
-							clients = deserialize_clients_data(content);
-						}else if(strcmp(command_str, "LOGIN") == 0){
+						if(tokens[0] == "REFRESH"){
+							clients = deserialize_clients_data(tokens[1]);
+						}else if(tokens[0] ==  "LOGIN"){
 							//cout << "Inside receive msgs from server"<<endl;
-							clients = deserialize_clients_data(content);
-						}else if(strcmp(command_str, "SEND") == 0){
-							//cout << "Inside send response"<<endl;
-							//cout << "message is: "<<content<<endl;
-                            token = strtok(content, " ");
-                            if(token != nullptr){
-                                char source_ip[INET_ADDRSTRLEN];
-                                strcpy(source_ip, token);
-                                token = strtok(nullptr, "");
-                                if(token != nullptr){
-                                    char message[300];
-									strcpy(message, token);
-									char command[] = "RECEIVED";
-									cse4589_print_and_log("[%s:SUCCESS]\n", command);
-                                    cse4589_print_and_log("msg from:%s\n[msg]:%s\n", source_ip, message);
-									cse4589_print_and_log("[%s:END]\n", command);
-                                }
-                            }
-						}else if((strcmp(command_str, "BLOCK") == 0) || (strcmp(command_str, "UNBLOCK") == 0)){
-							//cout <<"Content: "<<content<<endl;;
-							if(strcmp(content, "ERROR") == 0){
-								cse4589_print_and_log("[%s:ERROR]\n", command_str);
-								cse4589_print_and_log("[%s:END]\n", command_str);
+							clients = deserialize_clients_data(tokens[1]);
+						}else if(tokens[0] == "SEND"){
+							if(tokens[1] == "ERROR"){
+								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
 							}else{
-								cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
-								cse4589_print_and_log("[%s:END]\n", command_str);
+								cse4589_print_and_log("[%s:SUCCESS]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}
+						}else if(tokens[0] == "RECEIVE") {
+							//cout << "Inside send response"<<endl;
+                            string source_ip;
+                            string message;
+                            ss >> source_ip;
+                            getline(ss, message);
+                        
+							char command[] = "RECEIVED";
+							cse4589_print_and_log("[%s:SUCCESS]\n", command);
+                            cse4589_print_and_log("msg from:%s\n[msg]:%s\n", source_ip.c_str(), message.c_str());
+							cse4589_print_and_log("[%s:END]\n", command);
+                            
+                            
+						}else if((tokens[0] ==  "BLOCK") || (tokens[0] == "UNBLOCK")){
+							if(tokens[1] == "ERROR"){
+								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}else{
+								cse4589_print_and_log("[%s:SUCCESS]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
 							}
 							return;
 						}
@@ -792,59 +765,66 @@ class Client{
 
 		void login(string server_ip, int server_port){
 			char command_str[] = "LOGIN";
-			struct sockaddr_in server_addr;
-			string ip_address;
-			char hostname[1024];
-			gethostname(hostname, 1024);
-			struct hostent *ht;
-			(ht = gethostbyname(hostname));
-			if ( ht == NULL)
-			{
-				//hostname error
-			}
-			struct in_addr **addr_list = (struct in_addr **)ht->h_addr_list;
-			for (int i = 0; addr_list[i] != NULL; ++i)
-			{
-				ip_address = inet_ntoa(*addr_list[i]);
-			}
-			// Create socket
-			client_socket = socket(AF_INET, SOCK_STREAM, 0);
-			if (client_socket == -1) {
-				cerr << "Error creating socket" << endl;
-				return;
-			}
-			// Bind the socket to an address and port
-			memset(&client_address, 0, sizeof(client_address));
-			client_address.sin_family = AF_INET;
-			//client_address.sin_addr.s_addr = INADDR_ANY;
-			client_address.sin_addr = *((struct in_addr *)ht->h_addr);
-			client_address.sin_port = htons(client_port_num);
-			if (bind(client_socket, (struct sockaddr *)&client_address, sizeof(client_address)) < 0)
-			{
-				close(client_socket);
-			}
-
-			// Set up server address structure
-			memset(&server_addr, 0, sizeof(server_addr));
-			server_addr.sin_family = AF_INET;
-			server_addr.sin_addr.s_addr = INADDR_ANY;
-			server_addr.sin_port = htons(server_port);
-
-			//Convert IPv4 addresses from text to binary form
-			if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
-				cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
+			if(isLoggedIn){
+				cse4589_print_and_log("[%s:ERROR]\n", command_str);
 				cse4589_print_and_log("[%s:END]\n", command_str);
-				close(client_socket);
 				return;
 			}
-			// Connect to server
-			int res = connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr));
-			if (res < 0) {
-				//cout << "Error in connecting with server" << endl;
-				cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
-				cse4589_print_and_log("[%s:END]\n", command_str);
-				close(client_socket);
-				return;
+			if(client_socket == -1){
+				struct sockaddr_in server_addr;
+				string ip_address;
+				char hostname[1024];
+				gethostname(hostname, 1024);
+				struct hostent *ht;
+				(ht = gethostbyname(hostname));
+				if ( ht == NULL)
+				{
+					//hostname error
+				}
+				struct in_addr **addr_list = (struct in_addr **)ht->h_addr_list;
+				for (int i = 0; addr_list[i] != NULL; ++i)
+				{
+					ip_address = inet_ntoa(*addr_list[i]);
+				}
+				// Create socket
+				client_socket = socket(AF_INET, SOCK_STREAM, 0);
+				if (client_socket == -1) {
+					cerr << "Error creating socket" << endl;
+					return;
+				}
+				// Bind the socket to an address and port
+				memset(&client_address, 0, sizeof(client_address));
+				client_address.sin_family = AF_INET;
+				//client_address.sin_addr.s_addr = INADDR_ANY;
+				client_address.sin_addr = *((struct in_addr *)ht->h_addr);
+				client_address.sin_port = htons(client_port_num);
+				if (bind(client_socket, (struct sockaddr *)&client_address, sizeof(client_address)) < 0)
+				{
+					close(client_socket);
+				}
+
+				// Set up server address structure
+				memset(&server_addr, 0, sizeof(server_addr));
+				server_addr.sin_family = AF_INET;
+				server_addr.sin_addr.s_addr = INADDR_ANY;
+				server_addr.sin_port = htons(server_port);
+
+				//Convert IPv4 addresses from text to binary form
+				if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
+					cse4589_print_and_log("[%s:ERROR]\n", command_str);
+					cse4589_print_and_log("[%s:END]\n", command_str);
+					close(client_socket);
+					return;
+				}
+				// Connect to server
+				int res = connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr));
+				if (res < 0) {
+					//cout << "Error in connecting with server" << endl;
+					cse4589_print_and_log("[%s:ERROR]\n", command_str);
+					cse4589_print_and_log("[%s:END]\n", command_str);
+					close(client_socket);
+					return;
+				}
 			}
 			string clients_in_server = "";
 			int result = send(client_socket, "LOGIN", strlen("LOGIN") + 1, 0);
@@ -875,42 +855,42 @@ class Client{
 		}
 
 		void print_client_ip(){
-			// int udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
-    		// if (udp_socket < 0) {
-        	// 	std::cerr << "Failed to create socket" << std::endl;
-    		// }
-			// struct sockaddr_in external_address;
-			// memset(&external_address, 0, sizeof(external_address));
-			// external_address.sin_family = AF_INET;
-			// external_address.sin_addr.s_addr = inet_addr("8.8.8.8");  //Google's IP
-			// external_address.sin_port = htons(53);
-			// // Connect to the public endpoint
-			// int err = connect(udp_socket, (const struct sockaddr*)&external_address, sizeof(external_address));
-			// if (err < 0) {
-			// 	std::cerr << "Failed to connect" << std::endl;
-			// 	close(udp_socket);
-			// 	return;
-			// }
-			// // Get the local IP address of the socket
-			// struct sockaddr_in local_address;
-			// socklen_t addr_len = sizeof(local_address);
-			// err = getsockname(udp_socket, (struct sockaddr*)&local_address, &addr_len);
-			// if (err < 0) {
-			// 	cerr << "Failed : local address" << endl;
-			// 	close(udp_socket);
-			// 	return;
-			// }
-			// // Convert the IP to a string and close the socket
-			// if (inet_ntop(AF_INET, &local_address.sin_addr, ip_buffer, sizeof(ip_buffer)) == NULL) {
-			// 	cerr << "Failed to convert IP address" << endl;
-			// 	close(udp_socket);
-			// 	return;
-			// }
+			int udp_socket = socket(AF_INET, SOCK_DGRAM, 0);
+    		if (udp_socket < 0) {
+        		std::cerr << "Failed to create socket" << std::endl;
+    		}
+			struct sockaddr_in external_address;
+			memset(&external_address, 0, sizeof(external_address));
+			external_address.sin_family = AF_INET;
+			external_address.sin_addr.s_addr = inet_addr("8.8.8.8");  //Google's IP
+			external_address.sin_port = htons(53);
+			// Connect to the public endpoint
+			int err = connect(udp_socket, (const struct sockaddr*)&external_address, sizeof(external_address));
+			if (err < 0) {
+				std::cerr << "Failed to connect" << std::endl;
+				close(udp_socket);
+				return;
+			}
+			// Get the local IP address of the socket
+			struct sockaddr_in local_address;
+			socklen_t addr_len = sizeof(local_address);
+			err = getsockname(udp_socket, (struct sockaddr*)&local_address, &addr_len);
+			if (err < 0) {
+				cerr << "Failed : local address" << endl;
+				close(udp_socket);
+				return;
+			}
+			// Convert the IP to a string and close the socket
+			if (inet_ntop(AF_INET, &local_address.sin_addr, ip_buffer, sizeof(ip_buffer)) == NULL) {
+				cerr << "Failed to convert IP address" << endl;
+				close(udp_socket);
+				return;
+			}
 			char command_str[] = "IP";
 			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
-			cse4589_print_and_log("IP:%s\n", ip_addr);
+			cse4589_print_and_log("IP:%s\n", ip_buffer);
 			cse4589_print_and_log("[%s:END]\n", command_str);
-			//close(udp_socket);
+			close(udp_socket);
 			return;
 		}
 
@@ -1003,7 +983,7 @@ class Client{
                 return;
             }
 			//send message to the server
-            string message_to_send = "SEND " + string(ip_buffer) + " " + destination_ip + " " + message;
+            string message_to_send = "SEND " + string(ip_addr) + " " + destination_ip + " " + message;
 			//cout << "Message sending to server: "<<message_to_send<<endl;
             int result = send(client_socket, message_to_send.c_str(), message_to_send.length(), 0);
 			//cout << "After sending message to server"<<endl;
@@ -1012,14 +992,12 @@ class Client{
 				cse4589_print_and_log("[%s:END]\n", command_str);
                 return;
             }
-            cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
-			cse4589_print_and_log("[%s:END]\n", command_str);
 		}
 
 		//clients wants to logout
 		void logout(){
 			//cout << "Inside logout method" <<endl;
-			char command_str[100] = "LOGOUT";
+			char command_str[] = "LOGOUT";
 			if(!isLoggedIn){
 				cse4589_print_and_log("[%s:ERROR]\n", command_str);
 				cse4589_print_and_log("[%s:END]\n", command_str);
@@ -1029,8 +1007,6 @@ class Client{
 			uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
 			send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
 			send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
-			// close(client_socket);
-			// client_socket = -1;
 			isLoggedIn = false;
 			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
 			cse4589_print_and_log("[%s:END]\n", command_str);
