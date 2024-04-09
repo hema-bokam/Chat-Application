@@ -239,10 +239,27 @@ class Server{
 								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
 								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
 							}
+						}else if(strcmp(command, "STATISTICS") == 0){
+							print_statistics();
 						}
 				}
 			}
 		}
+		void print_statistics(){
+			char command_str[] = "STATISTICS";
+			char loggedIn[] = "logged-in";
+			char loggedOut[] = "logged-out";
+			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
+			for(int i=0; i<clients.size(); i++){
+                if(clients[i].login_state){
+					cse4589_print_and_log("%-5d%-35s%-8d%-8d%-8s\n", i+1, clients[i].host_name.c_str(), clients[i].msgs_sent, clients[i].msgs_recv, loggedIn);
+				}else{
+					cse4589_print_and_log("%-5d%-35s%-8d%-8d%-8s\n", i+1, clients[i].host_name.c_str(), clients[i].msgs_sent, clients[i].msgs_recv, loggedOut);
+				}
+            }
+			cse4589_print_and_log("[%s:END]\n", command_str);
+		}
+
 		bool check_ip_exists(string ip){
 			for(auto &client : clients){
                 if(client.ip == ip){
@@ -289,7 +306,6 @@ class Server{
 			if(tokens.empty()) return;
 			//cout << "Command is: "<<command_str<<endl;
 			//cout << "Buffer message: "<<buffer<<endl;
-			// Check if the message is a logout request
 			if(tokens[0] == "LOGIN"){
 				for(auto &client : clients){
 					if(client.socket_fd == client_socket){
@@ -299,6 +315,8 @@ class Server{
 				}
 				//cout << "Inside handle client login "<<endl;
 				string data_to_transfer = serialize_clients_data(tokens[0]);
+				//add buffer msgs to the string
+				
 				//cout << "After serialization data: "<<data_to_transfer<<endl;
 				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
 				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
@@ -626,7 +644,7 @@ class Client{
 						throw invalid_argument("Invalid port number");
 					}
 					//send login request to the server
-					//cout << "before calling login method"<<endl;
+					cout << "before calling login method"<<endl;
 					login(tokens[1], atoi(tokens[2].c_str()));
 					//cout << "after calling login method"<<endl;
 				}catch(const invalid_argument& exception){
@@ -740,7 +758,7 @@ class Client{
                             string message;
                             ss >> source_ip;
                             getline(ss, message);
-                        
+							message = message.substr(1);
 							char command[] = "RECEIVED";
 							cse4589_print_and_log("[%s:SUCCESS]\n", command);
                             cse4589_print_and_log("msg from:%s\n[msg]:%s\n", source_ip.c_str(), message.c_str());
@@ -830,7 +848,6 @@ class Client{
 			int result = send(client_socket, "LOGIN", strlen("LOGIN") + 1, 0);
 			if(result < 0){
 				 close(client_socket);
-				 //isLoggedIn = false;
 				 return;
 			}		
 			isLoggedIn = true;
