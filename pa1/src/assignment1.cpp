@@ -299,7 +299,7 @@ class Server{
             vector<string> tokens;
 			while (ss >> command_str) {
 				tokens.push_back(command_str);
-				if (command_str == "SEND") {
+				if ((command_str == "SEND") || (command_str == "BROADCAST")) {
 					break;
 				}
 			}
@@ -314,9 +314,29 @@ class Server{
 					}
 				}
 				//cout << "Inside handle client login "<<endl;
-				string data_to_transfer = serialize_clients_data(tokens[0]);
 				//add buffer msgs to the string
-				
+				for(auto &client : clients){
+					if(client.socket_fd == client_socket){
+						//check if there are any buffered messages for the client
+						if(client.buffer_messages_map.find(client.ip) != client.buffer_messages_map.end()){
+							for(auto &buffer_message : client.buffer_messages_map[client.ip]){
+								char command[] = "RELAYED";									
+								cse4589_print_and_log("[%s:SUCCESS]\n", command);
+								cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", buffer_message.source_ip.c_str(), buffer_message.destination_ip.c_str(), buffer_message.message.c_str());
+								cse4589_print_and_log("[%s:END]\n", command);
+								string data_to_transfer = "RECEIVE " + buffer_message.source_ip + " " + buffer_message.message;
+								// cout << "After serialization data: "<<data_to_transfer<<endl;
+								uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+								send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+								send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+								client.msgs_recv++;
+							}
+							client.buffer_messages_map.erase(client.ip);
+						}
+						break;
+					}
+				}
+				string data_to_transfer = serialize_clients_data(tokens[0]);
 				//cout << "After serialization data: "<<data_to_transfer<<endl;
 				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
 				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
@@ -392,6 +412,7 @@ class Server{
 							uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
 							send(receiver_client->socket_fd, &data_length, sizeof(data_length), 0); // Send the length first
 							send(receiver_client->socket_fd, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+							receiver_client->msgs_recv++;
 						}
 						else{
 							buffer_message_info buffer_message;
@@ -402,8 +423,7 @@ class Server{
 							//cout << "Buffered messages is: "<<receiver_client->buffer_messages_map[destination_ip].size()<<endl;
 						}
 						//cout << "sender client msgs sent: "<<sender_client->msgs_sent<<endl;
-						//cout << "receiver client msgs received: "<<receiver_client->msgs_recv<<endl;
-						receiver_client->msgs_recv++;
+						//cout << "receiver client msgs received: "<<receiver_client->msgs_recv<<endl; 
 					}
 					sender_client->msgs_sent++;
 					response_to_client = "SEND SUCCESS";
@@ -411,9 +431,59 @@ class Server{
 					send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
 					send(client_socket, response_to_client.c_str(), response_to_client.length(), 0);
 					return;
+				}	
+			}else if(tokens[0] == "BROADCAST"){
+				string source_ip;
+                string message;
+                ss>>source_ip;
+                getline(ss, message);
+                message = message.substr(1);
+				//find sender client
+				auto sender_client = std::find_if(clients.begin(), clients.end(), [client_socket](const client_details& client) {
+					return client.socket_fd == client_socket;
+				});
+				char command[] = "RELAYED";
+				cse4589_print_and_log("[%s:SUCCESS]\n", command);
+				cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", source_ip.c_str(), "255.255.255.255", message.c_str());
+				cse4589_print_and_log("[%s:END]\n", command);
+				for(auto &client : clients){
+					if(client.socket_fd != client_socket){
+						bool isBlocked = false;
+						for (const auto& blocked_ip : client.blocked_clients_set) { // Iterate over blocked IPs
+							if (source_ip == blocked_ip) { // If source IP is in the blocked set
+								isBlocked = true;
+								break; 
+							}
+						}
+						if(!isBlocked){
+							if(client.login_state){
+								string data_to_transfer = "RECEIVE " + string(source_ip) + " " + message;
+								// cout << "After serialization data: "<<data_to_transfer<<endl;
+								uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+								send(client.socket_fd, &data_length, sizeof(data_length), 0); // Send the length first
+								send(client.socket_fd, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+								client.msgs_recv++;
+							}
+							else{
+								string destination_ip = client.ip;
+								buffer_message_info buffer_message;
+								buffer_message.source_ip = source_ip;
+								buffer_message.destination_ip = destination_ip;
+								buffer_message.message = message;
+								client.buffer_messages_map[destination_ip].push_back(buffer_message);
+								//cout << "Buffered messages is: "<<receiver_client->buffer_messages_map[destination_ip].size()<<endl;
+							}
+						}
+					}
 				}
-				
-            }else if((tokens[0] == "BLOCK") || (tokens[0] == "UNBLOCK")){
+				sender_client->msgs_sent++;
+				string response_to_client = "BROADCAST SUCCESS";
+				uint32_t data_length = htonl(response_to_client.length()); // Ensure network byte order
+				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+				send(client_socket, response_to_client.c_str(), response_to_client.length(), 0);
+				return;
+			}
+			else if((tokens[0] == "BLOCK") || (tokens[0] == "UNBLOCK")){
                 string client_ip = tokens[1];
 				//cout << "Client ip to block: "<<client_ip <<endl;
 				auto sender_client = std::find_if(clients.begin(), clients.end(), [client_socket](const client_details& client) {
@@ -611,7 +681,7 @@ class Client{
 
 			while (ss >> command) {
 				tokens.push_back(command);
-				if (tokens[0] == "SEND") {
+				if (tokens[0] == "SEND" || tokens[0] == "BROADCAST") {
 					break;
 				}
 			}
@@ -644,7 +714,7 @@ class Client{
 						throw invalid_argument("Invalid port number");
 					}
 					//send login request to the server
-					cout << "before calling login method"<<endl;
+					//cout << "before calling login method"<<endl;
 					login(tokens[1], atoi(tokens[2].c_str()));
 					//cout << "after calling login method"<<endl;
 				}catch(const invalid_argument& exception){
@@ -652,7 +722,6 @@ class Client{
 					cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
 				}
 			}else if(tokens[0] == "SEND"){
-
 				try{
 					string ip_address;
 					ss >> ip_address;
@@ -679,6 +748,14 @@ class Client{
 					cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
 				}
 				//cout << "Message to send: "<< message << endl;
+			}else if(tokens[0] == "BROADCAST"){
+				string message;
+				getline(ss, message); // The rest of the line is the message
+				if (message.empty()) {
+					throw invalid_argument("Missing message");
+				}
+				message = message.substr(1);
+				send_broadcast_message(message);
 			}else if(tokens[0] == "LOGOUT"){
 				//cout << "inside command client logout"<<endl;
 				logout();
@@ -698,7 +775,6 @@ class Client{
 				}
 			}
 		}
-				
 
 		void receive_messages_from_server(){
 		//	cout << "Inside receive messages from server"<<endl;
@@ -752,7 +828,16 @@ class Client{
 								cse4589_print_and_log("[%s:SUCCESS]\n", tokens[0].c_str());
 								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
 							}
-						}else if(tokens[0] == "RECEIVE") {
+						}else if(tokens[0] == "BROADCAST"){
+							if(tokens[1] == "ERROR"){
+								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}else{
+								cse4589_print_and_log("[%s:SUCCESS]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}
+						}
+						else if(tokens[0] == "RECEIVE") {
 							//cout << "Inside send response"<<endl;
                             string source_ip;
                             string message;
@@ -1001,6 +1086,24 @@ class Client{
             }
 			//send message to the server
             string message_to_send = "SEND " + string(ip_addr) + " " + destination_ip + " " + message;
+			//cout << "Message sending to server: "<<message_to_send<<endl;
+            int result = send(client_socket, message_to_send.c_str(), message_to_send.length(), 0);
+			//cout << "After sending message to server"<<endl;
+            if(result < 0){
+                cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+                return;
+            }
+		}
+
+		void send_broadcast_message(string message){
+			char command_str[] = "BROADCAST";
+			if(!isLoggedIn){
+				cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+				return;
+			}
+			string message_to_send = "BROADCAST " + string(ip_addr) + " "+ message;
 			//cout << "Message sending to server: "<<message_to_send<<endl;
             int result = send(client_socket, message_to_send.c_str(), message_to_send.length(), 0);
 			//cout << "After sending message to server"<<endl;
