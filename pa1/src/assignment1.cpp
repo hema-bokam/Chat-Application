@@ -388,7 +388,7 @@ class Server{
 					return client.socket_fd == client_socket;
 				});
 				auto receiver_client = std::find_if(clients.begin(), clients.end(), [destination_ip](const client_details& client) {
-					return client.ip == destination_ip && client.login_state;
+					return client.ip == destination_ip;
 				});
 				string response_to_client;
 				if(receiver_client == clients.end()){
