@@ -37,9 +37,11 @@
 #include <vector>
 #include <string>
 #include <sstream>
+#include <map>
 
 #include "../include/global.h"
 #include "../include/logger.h"
+#include <set>
 
 // #include "logger.cpp"
 
@@ -62,6 +64,13 @@ using namespace std;
 
 //we referred to beej guide for socket programming core functionalities
 //reference: https://beej.us/guide/bgnet/html/split/index.html
+
+struct buffer_message_info{
+	string source_ip;
+	string destination_ip;
+	string message;
+};
+
 //to store all the required information related to the client
 struct client_details{
 	string ip;
@@ -70,10 +79,15 @@ struct client_details{
 	bool login_state;
 	//below field is useful for sending data to the client 
 	int socket_fd; //it will help to identify the client socket
+	//set to store blocked clients
+    set<string> blocked_clients_set; //stores ip address of blocked clients
+	int msgs_recv = 0;
+	int msgs_sent = 0;
+	map<string, vector<buffer_message_info>> buffer_messages_map;
 };
 
-bool is_valid_ip_address(char* address);   //checks if the given IP address is in valid format or not.
-bool is_valid_port(char* port);  //checks if the given port is a valid number or not
+bool is_valid_ip_address(const string& ip);  //checks if the given IP address is in valid format or not.
+bool is_valid_port(const string& port);  //checks if the given port is a valid number or not
 
 class Server{
 	public: 
@@ -85,7 +99,7 @@ class Server{
 
 		Server(int port_num){
 			server_port_num = port_num;
-			int client_socket, activity, max_sd;
+			int max_sd;
 			//declare file descriptor
 			fd_set readfds;
 			char command[100];  //to store input command
@@ -111,25 +125,26 @@ class Server{
 				std::cerr << "Error listening" << std::endl;
 				return;
 			}
+
 			char server_hostname[NI_MAXHOST];
 			gethostname(server_hostname, NI_MAXHOST);
 			if (gethostname(server_hostname, sizeof(server_hostname)) == -1) {
-				std::cerr << "Failed to get local hostname." << endl;
+				cerr << "Failed to get local hostname." << endl;
 				return; 
 			}
+
 			struct hostent *host_info = gethostbyname(server_hostname);
 			if (host_info == nullptr) {
-				std::cerr << "Failed to get host info for " << server_hostname << endl;
+				cerr << "Failed to get host info for " << server_hostname << endl;
 				return; 
 			}
 			string server_ip_address = inet_ntoa(*(struct in_addr *)host_info->h_addr_list[0]);
 			// cout<<"server hostname: "<<hostname << endl;
 			// cout << "server ip address: "<<server_ip_address<<endl;
 			int addressLen = sizeof(server_address);
-			sockaddr_in client_address;
-            socklen_t client_address_size = sizeof(client_address);
-			//memset(&client_address, 0, sizeof(client_address));
+			
 			while(true) {
+				
 				FD_ZERO(&readfds);
 				//add master socket to set
 				FD_SET(server_socket, &readfds);
@@ -147,18 +162,22 @@ class Server{
 				}
 				// reference: https://beej.us/guide/bgnet/html/split/slightly-advanced-techniques.html#select
 				//waiting for an activity on one of the sockets, timeout is NULL.
-				activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
+				int activity = select(max_sd + 1, &readfds, NULL, NULL, NULL);
 				if((activity < 0) && (errno!=EINTR)) {
-					std::cout << "select error";
+					cout << "select error";
 				}
 				//Accepts incoming requests
 				if(FD_ISSET(server_socket, &readfds)) {
+					int client_socket;
+					sockaddr_in client_address;
+            	    socklen_t client_address_size = sizeof(client_address);
 					if((client_socket = accept(server_socket, (struct sockaddr*)&client_address, &client_address_size)) < 0){
 						//error accepting incoming request
 						exit(0);
 					}
 					char client_hostname[NI_MAXHOST];
 					int res = getnameinfo((struct sockaddr*)&client_address, sizeof(client_address),client_hostname, NI_MAXHOST, NULL, 0, 0);
+					
 					if (res == 0) {
 						//store client information
 						client_details client;
@@ -166,24 +185,21 @@ class Server{
 						client.ip = inet_ntoa(client_address.sin_addr);
 						client.port_num = ntohs(client_address.sin_port);
 						client.socket_fd = client_socket;	
+						client.login_state = true;
 						//store in the vector. It will help retrive all connected clients to the given server
 						clients.push_back(client);
 					}
 				}
 				// Handle client messages
 				for (auto &client : clients) {
-					if (FD_ISSET(client.socket_fd, &readfds)) {
-						if (!handleClientMessage(client.socket_fd)) {
-							// If handleClientMessage returns false, it means the client disconnected or logged out or exited
-							close(client.socket_fd); //close the client socket
-							client.socket_fd = -1; // Mark as closed
+					if(client.socket_fd >= 0){
+						if (FD_ISSET(client.socket_fd, &readfds)) {
+							handleClientMessage(client.socket_fd);
+							
 						}
 					}
 				}
-				//remove clients that are marked as closed.
-				clients.erase(std::remove_if(clients.begin(), clients.end(), 
-											[](const client_details& c) { return c.socket_fd == -1; }), clients.end());
-				//handle input operations
+			
 				if(FD_ISSET(STDIN_FILENO, &readfds)){
 						memset(&command, 0, sizeof(command));
 						ssize_t readBytes = read(STDIN_FILENO, command, sizeof(command) - 1); // read command
@@ -202,47 +218,336 @@ class Server{
 							cse4589_print_and_log("[%s:SUCCESS]\n", command);
 							print_connected_clients();
 							cse4589_print_and_log("[%s:END]\n", command);
+						}else if(strncmp(command, "BLOCKED", 7) == 0){
+							stringstream ss(command);
+							//string command_str;
+							vector<string> tokens;
+
+							// Tokenize the input
+							while (ss >> command) {
+								tokens.push_back(command);
+							}
+							// cout << "command is: "<<command_str<<endl;
+							// cout << "Blocked ip: "<<ip_client<<endl;
+							try{
+								if((tokens.size() < 2) || !is_valid_ip_address(tokens[1]) || !check_ip_exists(tokens[1])){
+									throw invalid_argument("IP is invalid");
+								}
+								//cout <<"Valid ip"<<endl;
+								print_blocked_clients(tokens[1]);
+							}catch(const invalid_argument& exception){
+								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}
+						}else if(strcmp(command, "STATISTICS") == 0){
+							print_statistics();
 						}
 				}
 			}
 		}
+		void print_statistics(){
+			char command_str[] = "STATISTICS";
+			char loggedIn[] = "logged-in";
+			char loggedOut[] = "logged-out";
+			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
+			for(int i=0; i<clients.size(); i++){
+                if(clients[i].login_state){
+					cse4589_print_and_log("%-5d%-35s%-8d%-8d%-8s\n", i+1, clients[i].host_name.c_str(), clients[i].msgs_sent, clients[i].msgs_recv, loggedIn);
+				}else{
+					cse4589_print_and_log("%-5d%-35s%-8d%-8d%-8s\n", i+1, clients[i].host_name.c_str(), clients[i].msgs_sent, clients[i].msgs_recv, loggedOut);
+				}
+            }
+			cse4589_print_and_log("[%s:END]\n", command_str);
+		}
 
-		string serialize_clients_data(){
+		bool check_ip_exists(string ip){
+			for(auto &client : clients){
+                if(client.ip == ip){
+                    return true;
+                }
+            }
+			return false;
+		}
+		string serialize_clients_data(string command){
 			stringstream ss;
+			ss << command << " ";
 			for (const auto& client : clients) {
-				ss << client.ip << "," 
-				<< client.port_num << ","
-				<< client.host_name << ","
-				<< (client.login_state ? "true" : "false") << ","
-				<< (client.socket_fd) <<  ";";
+				if(client.login_state){
+					ss << client.ip << "," 
+					<< client.port_num << ","
+					<< client.host_name << ","
+					<< (client.login_state ? "true" : "false") << ","
+					<< (client.socket_fd) <<  ";";
+				}
 			}
 			//cout << "Serialized client info string: "<<ss.str()<<endl;
 			return ss.str();
 		}
 
-		//It will handle 2 client messages, i.e., LOGOUT and SEND_CLIENTS_INFO
-		//If clients sends "SEND_CLIENTS_INFO" message we are directly sending required information from this method
-		//If client send "LOGOUT" message to the server, then we return boolean value. We will handle this case in server loop
-		bool handleClientMessage(int client_socket) {
+		//It will handle all client messages
+		void handleClientMessage(int client_socket) {
 			char buffer[1024];
 			memset(buffer, 0, sizeof(buffer));
 			int bytes_received = recv(client_socket, buffer, sizeof(buffer), 0);
 			if (bytes_received <= 0) {
-				//return false;
+				return;
 			}
+			//cout << "Buffer message before: "<<buffer<<endl;
+			stringstream ss;
+            ss << buffer;
+            string command_str;
+            vector<string> tokens;
+			while (ss >> command_str) {
+				tokens.push_back(command_str);
+				if ((command_str == "SEND") || (command_str == "BROADCAST")) {
+					break;
+				}
+			}
+			if(tokens.empty()) return;
+			//cout << "Command is: "<<command_str<<endl;
 			//cout << "Buffer message: "<<buffer<<endl;
-			// Check if the message is a logout request
-			if (strcmp(buffer, "LOGOUT") == 0) {
-				return false; // Indicates that the client wants to log out
-			}else if(strcmp(buffer, "SEND_CLIENTS_INFO") == 0){
-				string data_to_transfer = serialize_clients_data();
+			if(tokens[0] == "LOGIN"){
+				for(auto &client : clients){
+					if(client.socket_fd == client_socket){
+						client.login_state = true;
+						break;
+					}
+				}
+				//cout << "Inside handle client login "<<endl;
+				//add buffer msgs to the string
+				for(auto &client : clients){
+					if(client.socket_fd == client_socket){
+						//check if there are any buffered messages for the client
+						if(client.buffer_messages_map.find(client.ip) != client.buffer_messages_map.end()){
+							for(auto &buffer_message : client.buffer_messages_map[client.ip]){
+								char command[] = "RELAYED";									
+								cse4589_print_and_log("[%s:SUCCESS]\n", command);
+								cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", buffer_message.source_ip.c_str(), buffer_message.destination_ip.c_str(), buffer_message.message.c_str());
+								cse4589_print_and_log("[%s:END]\n", command);
+								string data_to_transfer = "RECEIVE " + buffer_message.source_ip + " " + buffer_message.message;
+								// cout << "After serialization data: "<<data_to_transfer<<endl;
+								uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+								send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+								send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+								client.msgs_recv++;
+							}
+							client.buffer_messages_map.erase(client.ip);
+						}
+						break;
+					}
+				}
+				string data_to_transfer = serialize_clients_data(tokens[0]);
 				//cout << "After serialization data: "<<data_to_transfer<<endl;
 				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
 				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
 				send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
-				return true;
+				
+				return;
+			}else if(tokens[0] == "EXIT"){
+				for(auto &client : clients){
+					if(client.socket_fd == client_socket){
+						client.socket_fd = -1;
+						break;
+					}
+				}
+				//cout << "before exit clients size: "<<clients.size()<<endl;
+				clients.erase(std::remove_if(clients.begin(), clients.end(), 
+											[](const client_details& c) { return c.socket_fd == -1; }), clients.end());
+				//cout << "After exit clients size: "<<clients.size()<<endl;
+				return; // Indicates that the client wants to exit
+			}else if(tokens[0] == "LOGOUT"){
+				//cout << "Inside handle client logout"<<endl;
+				for(auto &client : clients){
+					if(client.socket_fd == client_socket){
+						client.login_state = false;
+						return;
+					}
+				}
+			}else if(tokens[0] == "REFRESH"){
+				string data_to_transfer = serialize_clients_data(tokens[0]);
+				//cout << "After serialization data: "<<data_to_transfer<<endl;
+				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+				send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+			
+			}else if(tokens[0] == "SEND"){
+                string source_ip;
+                string destination_ip;
+                string message;
+                ss>>source_ip;
+                ss>>destination_ip;
+                getline(ss, message);
+                message = message.substr(1);
+				// cout << "message: "<<message<<endl;
+				// cout <<"source ip: "<<source_ip<<endl;
+				// cout<<"destination ip: "<<destination_ip<<endl;
+
+				bool isDestinationIpExist = false;
+            	//try to send message to the corresponding client
+				auto sender_client = std::find_if(clients.begin(), clients.end(), [client_socket](const client_details& client) {
+					return client.socket_fd == client_socket;
+				});
+				auto receiver_client = std::find_if(clients.begin(), clients.end(), [destination_ip](const client_details& client) {
+					return client.ip == destination_ip;
+				});
+				string response_to_client;
+				if(receiver_client == clients.end()){
+					//response_to_client = "SEND ERROR";
+				}
+				else{
+					bool isBlocked = false;
+					
+					if(receiver_client->blocked_clients_set.find(source_ip) != receiver_client->blocked_clients_set.end()){
+						isBlocked = true;
+					}
+					
+					if(!isBlocked){
+						if(receiver_client->login_state){
+							char command[] = "RELAYED";
+							cse4589_print_and_log("[%s:SUCCESS]\n", command);
+							cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", source_ip.c_str(), destination_ip.c_str(), message.c_str());
+							cse4589_print_and_log("[%s:END]\n", command);
+							string data_to_transfer = "RECEIVE " + string(source_ip) + " " + message;
+							// cout << "After serialization data: "<<data_to_transfer<<endl;
+							uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+							send(receiver_client->socket_fd, &data_length, sizeof(data_length), 0); // Send the length first
+							send(receiver_client->socket_fd, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+							receiver_client->msgs_recv++;
+						}
+						else{
+							buffer_message_info buffer_message;
+							buffer_message.source_ip = source_ip;
+							buffer_message.destination_ip = destination_ip;
+							buffer_message.message = message;
+							receiver_client->buffer_messages_map[destination_ip].push_back(buffer_message);
+							//cout << "Buffered messages is: "<<receiver_client->buffer_messages_map[destination_ip].size()<<endl;
+						}
+						//cout << "sender client msgs sent: "<<sender_client->msgs_sent<<endl;
+						//cout << "receiver client msgs received: "<<receiver_client->msgs_recv<<endl; 
+					}
+					sender_client->msgs_sent++;
+					response_to_client = "SEND SUCCESS";
+					uint32_t data_length = htonl(response_to_client.length()); // Ensure network byte order
+					send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+					send(client_socket, response_to_client.c_str(), response_to_client.length(), 0);
+					return;
+				}	
+			}else if(tokens[0] == "BROADCAST"){
+				string source_ip;
+                string message;
+                ss>>source_ip;
+                getline(ss, message);
+                message = message.substr(1);
+				//find sender client
+				auto sender_client = std::find_if(clients.begin(), clients.end(), [client_socket](const client_details& client) {
+					return client.socket_fd == client_socket;
+				});
+				char command[] = "RELAYED";
+				cse4589_print_and_log("[%s:SUCCESS]\n", command);
+				cse4589_print_and_log("msg from:%s, to:%s\n[msg]:%s\n", source_ip.c_str(), "255.255.255.255", message.c_str());
+				cse4589_print_and_log("[%s:END]\n", command);
+				for(auto &client : clients){
+					if(client.socket_fd != client_socket){
+						bool isBlocked = false;
+						for (const auto& blocked_ip : client.blocked_clients_set) { // Iterate over blocked IPs
+							if (source_ip == blocked_ip) { // If source IP is in the blocked set
+								isBlocked = true;
+								break; 
+							}
+						}
+						if(!isBlocked){
+							if(client.login_state){
+								string data_to_transfer = "RECEIVE " + string(source_ip) + " " + message;
+								// cout << "After serialization data: "<<data_to_transfer<<endl;
+								uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+								send(client.socket_fd, &data_length, sizeof(data_length), 0); // Send the length first
+								send(client.socket_fd, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+								client.msgs_recv++;
+							}
+							else{
+								string destination_ip = client.ip;
+								buffer_message_info buffer_message;
+								buffer_message.source_ip = source_ip;
+								buffer_message.destination_ip = destination_ip;
+								buffer_message.message = message;
+								client.buffer_messages_map[destination_ip].push_back(buffer_message);
+								//cout << "Buffered messages is: "<<receiver_client->buffer_messages_map[destination_ip].size()<<endl;
+							}
+						}
+					}
+				}
+				sender_client->msgs_sent++;
+				string response_to_client = "BROADCAST SUCCESS";
+				uint32_t data_length = htonl(response_to_client.length()); // Ensure network byte order
+				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+				send(client_socket, response_to_client.c_str(), response_to_client.length(), 0);
+				return;
 			}
-			return true; // Indicates that the client is still connected
+			else if((tokens[0] == "BLOCK") || (tokens[0] == "UNBLOCK")){
+                string client_ip = tokens[1];
+				//cout << "Client ip to block: "<<client_ip <<endl;
+				auto sender_client = std::find_if(clients.begin(), clients.end(), [client_socket](const client_details& client) {
+					return client.socket_fd == client_socket;
+				});
+				string data_to_transfer;
+				if(tokens[0] == "BLOCK"){
+					if(sender_client->blocked_clients_set.find(client_ip) != sender_client->blocked_clients_set.end()){
+						//sender_client->socket_fd == client_socket
+						//already blocked
+						data_to_transfer = "BLOCK ERROR";
+						//send error message		
+					}
+					else{
+						sender_client->blocked_clients_set.insert(client_ip);
+						data_to_transfer = "BLOCK SUCCESS";
+					}
+				}
+				else if(tokens[0] == "UNBLOCK"){
+					if(sender_client->blocked_clients_set.find(client_ip) == sender_client->blocked_clients_set.end()){
+						//sender_client->socket_fd == client_socket
+						//already blocked
+						data_to_transfer = "UNBLOCK ERROR";
+						//send error message		
+					}
+					else{
+						sender_client->blocked_clients_set.erase(client_ip);
+						data_to_transfer = "UNBLOCK SUCCESS";
+					}
+				}
+				//cout << "Client socket: "<<client_socket << " Block client socket: "<<  sender_client->socket_fd <<endl;
+				//cout << "data to transfer for block: "<<data_to_transfer<<endl;
+				uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+				send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+				send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); 
+				return;
+			}
+			return;
+		}
+
+		void print_blocked_clients(string ip_client){
+			char command_str[] = "BLOCKED";
+			auto client = std::find_if(clients.begin(), clients.end(), [&ip_client](const client_details& client) {
+				return client.ip == ip_client;
+			});		
+			vector<client_details> blockedClients;
+			for (const auto& blocked_ip : client->blocked_clients_set) { // Iterate over blocked IPs
+				for (const auto& client : clients) { // Iterate over all clients
+					if (client.ip == blocked_ip) { // If client's IP is in the blocked set
+						blockedClients.push_back(client); // Store the client's details
+						break; 
+					}
+				}
+			}
+			std::sort(blockedClients.begin(), blockedClients.end(), [](const client_details& c1, const client_details& c2) {
+				return c1.port_num < c2.port_num;
+			});
+			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
+			//display list of blocked clients
+			for (int i=0; i<blockedClients.size(); i++) {
+				cse4589_print_and_log("%-5d%-35s%-20s%-8d\n", i+1, blockedClients[i].host_name.c_str(), blockedClients[i].ip.c_str(), blockedClients[i].port_num);
+			}
+			cse4589_print_and_log("[%s:END]\n", command_str);
+			return;
 		}
 
 		void print_server_author(){
@@ -306,23 +611,334 @@ class Server{
 			std::sort(clients.begin(), clients.end(), [](const client_details& c1, const client_details& c2) {
         	return c1.port_num < c2.port_num;
 			});
+			int count = 1;
 			for (int i=0; i<clients.size(); i++) {
-				cse4589_print_and_log("%-5d%-35s%-20s%-8d\n", i+1, clients[i].host_name.c_str(), clients[i].ip.c_str(), clients[i].port_num);
+				if(clients[i].login_state){
+					cse4589_print_and_log("%-5d%-35s%-20s%-8d\n", count, clients[i].host_name.c_str(), clients[i].ip.c_str(), clients[i].port_num);
+					count++;
+				}
 			}
 		}
 };
 
 class Client{
-		int client_port_num;
+		int client_port_num, fd_max;
 		struct sockaddr_in client_address;
 		int client_socket;
 		bool isLoggedIn = false;  //login state of a client
 		socklen_t client_address_Len = sizeof(client_address);
 		char ip_buffer[INET_ADDRSTRLEN];
 		vector<client_details> clients;
+		char* ip_addr;
 	public:
 		Client(int port_num){
 			client_port_num = port_num;
+			client_socket = -1;
+			char command[300];
+			fd_set readfds;
+			struct hostent *host_entry;
+			char hostname[1024];
+			
+			if (gethostname(hostname, sizeof(hostname)) == -1){
+				//cout << "error"<<endl;
+				cerr << "Cannot retrieve host name: " << hostname << endl;
+			}
+			if ((host_entry = gethostbyname(hostname)) == NULL){
+				//cout <<"error"<<endl;
+				cerr << "Cannot retrieve host entry" << endl;
+		    }
+			ip_addr = inet_ntoa(*((struct in_addr *)host_entry->h_addr_list[0]));
+			while(true){
+				FD_ZERO(&readfds);
+				FD_SET(STDIN_FILENO, &readfds);
+				if(client_socket >= 0){
+					FD_SET(client_socket, &readfds); // client_socket is your connected socket
+					fd_max = (STDIN_FILENO > client_socket) ? STDIN_FILENO : client_socket;
+				}else fd_max = STDIN_FILENO;
+
+				if (select(fd_max + 1, &readfds, NULL, NULL, NULL) == -1) {
+					exit(4);
+				}
+				//handle input operations
+				if(FD_ISSET(STDIN_FILENO, &readfds)){
+					bzero(&command, sizeof(command));
+					read(STDIN_FILENO, command, sizeof(command) - 1); 
+					command[strlen(command)-1]='\0';
+					process_commands(command);
+				}
+				if(client_socket >= 0){
+					if(FD_ISSET(client_socket, &readfds)){
+						receive_messages_from_server();
+					}
+				}
+			}
+		}
+
+		void process_commands(string command_str){
+			stringstream ss(command_str);
+			string command;
+			vector<string> tokens;
+
+			while (ss >> command) {
+				tokens.push_back(command);
+				if (tokens[0] == "SEND" || tokens[0] == "BROADCAST") {
+					break;
+				}
+			}
+
+			if (tokens.empty()) return;
+
+			if(tokens[0] == "EXIT"){
+				exit_request();
+				exit(0);
+			}else if(tokens[0] == "IP"){
+				print_client_ip();
+			}else if(tokens[0] == "PORT"){
+				print_client_port();
+			}else if(tokens[0] == "AUTHOR"){
+				print_client_author();
+			}else if(tokens[0] == "REFRESH"){
+				refresh();
+			}else if(tokens[0] == "LIST"){ 
+				//	cout << "Inside list command"<<endl;
+				print_client_list();
+			}else if(tokens[0] == "LOGIN"){
+				try{
+					if(isLoggedIn || tokens.size() < 3) throw invalid_argument("Missing server ip or port num");
+					if(!is_valid_ip_address(tokens[1])){
+						//throw exception when IP address is in invalid format
+						throw invalid_argument("Invalid IP address");
+					}
+					if(!is_valid_port(tokens[2])){
+						//throw exception when port number is invalid
+						throw invalid_argument("Invalid port number");
+					}
+					//send login request to the server
+					//cout << "before calling login method"<<endl;
+					login(tokens[1], atoi(tokens[2].c_str()));
+					//cout << "after calling login method"<<endl;
+				}catch(const invalid_argument& exception){
+					cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+					cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+				}
+			}else if(tokens[0] == "SEND"){
+				try{
+					string ip_address;
+					ss >> ip_address;
+					if (ip_address.empty()) { // Extract the IP address
+						throw invalid_argument("Missing IP address");
+					}
+					if(!is_valid_ip_address(ip_address)){
+						throw invalid_argument("Invalid IP address");
+					}
+					string message;
+					getline(ss, message); // The rest of the line is the message
+					if (message.empty()) {
+						throw invalid_argument("Missing message");
+					}
+					// Remove leading space from the message
+					message = message.substr(1);
+					//cout << "send to ip: "<<ip_address<<endl;
+					//cout << "message: "<<message<<endl;
+					//send message to the corresponding client
+					send_message(ip_address, message);
+					
+				}catch(const invalid_argument& exception){
+					cse4589_print_and_log("[%s:ERROR]\n",tokens[0].c_str());
+					cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+				}
+				//cout << "Message to send: "<< message << endl;
+			}else if(tokens[0] == "BROADCAST"){
+				string message;
+				getline(ss, message); // The rest of the line is the message
+				if (message.empty()) {
+					throw invalid_argument("Missing message");
+				}
+				message = message.substr(1);
+				send_broadcast_message(message);
+			}else if(tokens[0] == "LOGOUT"){
+				//cout << "inside command client logout"<<endl;
+				logout();
+			}else if((tokens[0] == "BLOCK") || (tokens[0] == "UNBLOCK")){
+				//cout << "command is: "<<tokens[0]<<endl;
+				try{
+					if(tokens.size() < 2) throw invalid_argument("Missing ip address to block");
+					if(!is_valid_ip_address(tokens[1])){
+					//throw exception when IP address is in invalid format
+					throw invalid_argument("Invalid IP address");
+					}
+					//cout << "Given ip: "<<block_client_ip<<endl;
+					block_or_unblock_client(tokens[1], tokens[0].c_str());
+				}catch(const invalid_argument& exception){
+					cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+					cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+				}
+			}
+		}
+
+		void receive_messages_from_server(){
+		//	cout << "Inside receive messages from server"<<endl;
+			
+			fd_set readfds;
+			FD_ZERO(&readfds);
+			FD_SET(client_socket, &readfds);
+
+			// Set timeout to 0, making select non-blocking
+			struct timeval tv;
+			tv.tv_sec = 0;  // 0 seconds
+			tv.tv_usec = 0; // 0 microseconds
+
+			if (select(client_socket + 1, &readfds, NULL, NULL, &tv) < 0) {
+				cerr << "select error" << endl;
+				return;
+			}
+
+			if (FD_ISSET(client_socket, &readfds)) {
+				// Data is available to read
+				uint32_t data_length;
+				// Make sure to check recv return value for errors or closed connection
+				if (recv(client_socket, &data_length, sizeof(data_length), 0) > 0) {
+					data_length = ntohl(data_length);
+					char data[1024];
+					memset(data, 0, sizeof(data));
+					if (recv(client_socket, data, data_length, 0) > 0) {
+                        stringstream ss;
+                        ss << data;
+                        vector<string> tokens;
+                        string command_str;
+                        while (ss >> command_str) {
+                            tokens.push_back(command_str);
+                            if(command_str == "RECEIVE"){
+                                break;
+                            }
+                        }
+                        if(tokens.empty()) return;
+						//cout << "Command is: "<<command_str<<endl;
+						//cout << "Content is: "<<content <<endl;
+						if(tokens[0] == "REFRESH"){
+							clients = deserialize_clients_data(tokens[1]);
+						}else if(tokens[0] ==  "LOGIN"){
+							//cout << "Inside receive msgs from server"<<endl;
+							clients = deserialize_clients_data(tokens[1]);
+						}else if(tokens[0] == "SEND"){
+							if(tokens[1] == "ERROR"){
+								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}else{
+								cse4589_print_and_log("[%s:SUCCESS]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}
+						}else if(tokens[0] == "BROADCAST"){
+							if(tokens[1] == "ERROR"){
+								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}else{
+								cse4589_print_and_log("[%s:SUCCESS]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}
+						}
+						else if(tokens[0] == "RECEIVE") {
+							//cout << "Inside send response"<<endl;
+                            string source_ip;
+                            string message;
+                            ss >> source_ip;
+                            getline(ss, message);
+							message = message.substr(1);
+							char command[] = "RECEIVED";
+							cse4589_print_and_log("[%s:SUCCESS]\n", command);
+                            cse4589_print_and_log("msg from:%s\n[msg]:%s\n", source_ip.c_str(), message.c_str());
+							cse4589_print_and_log("[%s:END]\n", command);
+                            
+                            
+						}else if((tokens[0] ==  "BLOCK") || (tokens[0] == "UNBLOCK")){
+							if(tokens[1] == "ERROR"){
+								cse4589_print_and_log("[%s:ERROR]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}else{
+								cse4589_print_and_log("[%s:SUCCESS]\n", tokens[0].c_str());
+								cse4589_print_and_log("[%s:END]\n", tokens[0].c_str());
+							}
+							return;
+						}
+					}
+				}
+			}
+			return;
+		}
+
+		void login(string server_ip, int server_port){
+			char command_str[] = "LOGIN";
+			if(isLoggedIn){
+				cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+				return;
+			}
+			if(client_socket == -1){
+				struct sockaddr_in server_addr;
+				string ip_address;
+				char hostname[1024];
+				gethostname(hostname, 1024);
+				struct hostent *ht;
+				(ht = gethostbyname(hostname));
+				if ( ht == NULL)
+				{
+					//hostname error
+				}
+				struct in_addr **addr_list = (struct in_addr **)ht->h_addr_list;
+				for (int i = 0; addr_list[i] != NULL; ++i)
+				{
+					ip_address = inet_ntoa(*addr_list[i]);
+				}
+				// Create socket
+				client_socket = socket(AF_INET, SOCK_STREAM, 0);
+				if (client_socket == -1) {
+					cerr << "Error creating socket" << endl;
+					return;
+				}
+				// Bind the socket to an address and port
+				memset(&client_address, 0, sizeof(client_address));
+				client_address.sin_family = AF_INET;
+				//client_address.sin_addr.s_addr = INADDR_ANY;
+				client_address.sin_addr = *((struct in_addr *)ht->h_addr);
+				client_address.sin_port = htons(client_port_num);
+				if (bind(client_socket, (struct sockaddr *)&client_address, sizeof(client_address)) < 0)
+				{
+					close(client_socket);
+				}
+
+				// Set up server address structure
+				memset(&server_addr, 0, sizeof(server_addr));
+				server_addr.sin_family = AF_INET;
+				server_addr.sin_addr.s_addr = INADDR_ANY;
+				server_addr.sin_port = htons(server_port);
+
+				//Convert IPv4 addresses from text to binary form
+				if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
+					cse4589_print_and_log("[%s:ERROR]\n", command_str);
+					cse4589_print_and_log("[%s:END]\n", command_str);
+					close(client_socket);
+					return;
+				}
+				// Connect to server
+				int res = connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr));
+				if (res < 0) {
+					//cout << "Error in connecting with server" << endl;
+					cse4589_print_and_log("[%s:ERROR]\n", command_str);
+					cse4589_print_and_log("[%s:END]\n", command_str);
+					close(client_socket);
+					return;
+				}
+			}
+			string clients_in_server = "";
+			int result = send(client_socket, "LOGIN", strlen("LOGIN") + 1, 0);
+			if(result < 0){
+				 close(client_socket);
+				 return;
+			}		
+			isLoggedIn = true;
+			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
+			cse4589_print_and_log("[%s:END]\n", command_str);
+			return;
 		}
 
 		void print_client_author(){
@@ -381,13 +997,16 @@ class Client{
 		}
 
 		void print_client_list(){
+			//cout << "Inside client list"<<endl;
 			char command_str[] = "LIST";
 			if(!isLoggedIn){
 				cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
 				return;
 			}
 			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
 			print_soted_client_list();
+			cse4589_print_and_log("[%s:END]\n", command_str);
 		}
 		void print_soted_client_list(){
 			std::sort(clients.begin(), clients.end(), [](const client_details& c1, const client_details& c2) {
@@ -396,82 +1015,6 @@ class Client{
 			for (int i=0; i<clients.size(); i++) {
 				cse4589_print_and_log("%-5d%-35s%-20s%-8d\n", i+1, clients[i].host_name.c_str(), clients[i].ip.c_str(), clients[i].port_num);
 			}
-		}
-
-		void login(string server_ip, int server_port){
-			struct sockaddr_in server_addr;
-			string ip_address;
-			char hostname[1024];
-			gethostname(hostname, 1024);
-			struct hostent *ht;
-			(ht = gethostbyname(hostname));
-			if ( ht == NULL)
-			{
-				//hostname error
-			}
-			struct in_addr **addr_list = (struct in_addr **)ht->h_addr_list;
-			for (int i = 0; addr_list[i] != NULL; ++i)
-			{
-				ip_address = inet_ntoa(*addr_list[i]);
-			}
-			// Create socket
-			client_socket = socket(AF_INET, SOCK_STREAM, 0);
-			if (client_socket == -1) {
-				cerr << "Error creating socket" << endl;
-				return;
-			}
-			// Bind the socket to an address and port
-			memset(&client_address, 0, sizeof(client_address));
-			client_address.sin_family = AF_INET;
-			//client_address.sin_addr.s_addr = INADDR_ANY;
-			client_address.sin_addr = *((struct in_addr *)ht->h_addr);
-			client_address.sin_port = htons(client_port_num);
-			if (bind(client_socket, (struct sockaddr *)&client_address, sizeof(client_address)) < 0)
-			{
-				close(client_socket);
-			}
-
-			// Set up server address structure
-			memset(&server_addr, 0, sizeof(server_addr));
-			server_addr.sin_family = AF_INET;
-			server_addr.sin_addr.s_addr = INADDR_ANY;
-			server_addr.sin_port = htons(server_port);
-
-			//Convert IPv4 addresses from text to binary form
-			if (inet_pton(AF_INET, server_ip.c_str(), &server_addr.sin_addr) <= 0) {
-				cse4589_print_and_log("[LOGIN:ERROR]\n");
-				close(client_socket);
-				return;
-			}
-			// Connect to server
-			int res = connect(client_socket, (struct sockaddr *)&server_addr, sizeof(server_addr));
-			if (res < 0) {
-				//cout << "Error in connecting with server" << endl;
-				cse4589_print_and_log("[LOGIN:ERROR]\n");
-				close(client_socket);
-				return;
-			}
-			string clients_in_server = "";
-			int result = send(client_socket, "SEND_CLIENTS_INFO", strlen("SEND_CLIENTS_INFO") + 1, 0);
-			if(result < 0){
-				 close(client_socket);
-				 //isLoggedIn = false;
-				 return;
-			}
-			//receive data from server
-			uint32_t data_length;
-			//from the server we are sending data length first and then data, so read the data length first then read the data
-			recv(client_socket, &data_length, sizeof(data_length), 0); // read the length first
-			data_length = ntohl(data_length); 
-			std::string data;
-			data.clear(); 
-			data = std::string(data_length, '\0');
-			recv(client_socket, &data[0], data_length, 0); //read exactly data_length bytes
-			//cout << "Data received from server: " << data << endl;
-			clients = deserialize_clients_data(data);   //deserialize the clients data and store them in clients vector
-			cse4589_print_and_log("[LOGIN:SUCCESS]\n");
-			isLoggedIn = true;
-			return;
 		}
 
 		vector<client_details> deserialize_clients_data(const string& clients_data){
@@ -504,36 +1047,116 @@ class Client{
 			char command_str[] = "REFRESH";
 			if(!isLoggedIn){
 				cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
 				return;
 			}
-			int result = send(client_socket, "SEND_CLIENTS_INFO", strlen("SEND_CLIENTS_INFO") + 1, 0);
+			int result = send(client_socket, "REFRESH", strlen("REFRESH") + 1, 0);
 			if(result < 0){
 				 //close(client_socket);
 				 return;
 			}
-			uint32_t data_length;
-			recv(client_socket, &data_length, sizeof(data_length), 0); //read the length first
-			data_length = ntohl(data_length); 
-			std::string data;
-			data.clear(); 
-			data = std::string(data_length, '\0');
-			recv(client_socket, &data[0], data_length, 0); //read exactly data_length bytes
-			//cout << "Data received from server: " << data << endl;
-			clients = deserialize_clients_data(data);
-			//cout << "After deserialization clients size: "<<clients.size()<<endl;
 			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
-			//print_sorted_client_list();
+			cse4589_print_and_log("[%s:END]\n", command_str);
 		}
 		
-		void exit(){
+		void exit_request(){
 			if(client_socket >= 0){
-				const char* logout_msg = "LOGOUT";
-				send(client_socket, logout_msg, strlen(logout_msg), 0);
+				const char* exit_msg = "EXIT";
+				send(client_socket, exit_msg, strlen(exit_msg), 0);
 			} 
 			char command_str[] = "EXIT";
 			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
 			cse4589_print_and_log("[%s:END]\n", command_str);
 		}
+
+		//send message to the client
+		void send_message(string destination_ip, string message){
+			char command_str[] = "SEND";
+			if(!isLoggedIn){
+				cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+				return;
+			}
+			//check if the destination ip address is there in clients list, if not send error message
+			bool isDestinationIpExist = check_ip_exists(destination_ip);
+            if(!isDestinationIpExist){
+                cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+                return;
+            }
+			//send message to the server
+            string message_to_send = "SEND " + string(ip_addr) + " " + destination_ip + " " + message;
+			//cout << "Message sending to server: "<<message_to_send<<endl;
+            int result = send(client_socket, message_to_send.c_str(), message_to_send.length(), 0);
+			//cout << "After sending message to server"<<endl;
+            if(result < 0){
+                cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+                return;
+            }
+		}
+
+		void send_broadcast_message(string message){
+			char command_str[] = "BROADCAST";
+			if(!isLoggedIn){
+				cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+				return;
+			}
+			string message_to_send = "BROADCAST " + string(ip_addr) + " "+ message;
+			//cout << "Message sending to server: "<<message_to_send<<endl;
+            int result = send(client_socket, message_to_send.c_str(), message_to_send.length(), 0);
+			//cout << "After sending message to server"<<endl;
+            if(result < 0){
+                cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+                return;
+            }
+		}
+
+		//clients wants to logout
+		void logout(){
+			//cout << "Inside logout method" <<endl;
+			char command_str[] = "LOGOUT";
+			if(!isLoggedIn){
+				cse4589_print_and_log("[%s:ERROR]\n", command_str);
+				cse4589_print_and_log("[%s:END]\n", command_str);
+				return;
+			}
+			string data_to_transfer = "LOGOUT";
+			uint32_t data_length = htonl(data_to_transfer.length()); // Ensure network byte order
+			send(client_socket, &data_length, sizeof(data_length), 0); // Send the length first
+			send(client_socket, data_to_transfer.c_str(), data_to_transfer.length(), 0); // Then send the data
+			isLoggedIn = false;
+			cse4589_print_and_log("[%s:SUCCESS]\n", command_str);
+			cse4589_print_and_log("[%s:END]\n", command_str);
+		}
+		
+		void block_or_unblock_client(string block_client_ip, const char *command){
+			if(!isLoggedIn){
+				cse4589_print_and_log("[%s:ERROR]\n", command);
+				cse4589_print_and_log("[%s:END]\n", command);
+				return;
+			}
+			bool isIpExist = check_ip_exists(block_client_ip);
+            if(!isIpExist){
+                cse4589_print_and_log("[%s:ERROR]\n", command);
+				cse4589_print_and_log("[%s:END]\n", command);
+                return;
+            }
+			string message_to_send = string(command) + " "+ block_client_ip;
+            send(client_socket, message_to_send.c_str(), message_to_send.length(), 0);
+		}
+
+		bool check_ip_exists(string ip){
+			for(auto &client : clients){
+                if(client.ip == ip){
+                    return true;
+                }
+            }
+			return false;
+		}
+
 };
 
 int main(int argc, char** argv)
@@ -555,60 +1178,6 @@ int main(int argc, char** argv)
 		}
 		else if(strcmp(argv[1], "c") == 0){
 			Client c(port_num);
-			char command[300];
-			while(true){
-				bzero(&command, sizeof(command));
-				read(STDIN_FILENO, command, sizeof(command) - 1); 
-				command[strlen(command)-1]='\0';
-				if(strcmp(command, "EXIT") == 0){
-					c.exit();
-					exit(0);
-				}else if(strcmp(command, "IP") == 0){
-					c.print_client_ip();
-				}else if(strcmp(command, "PORT") == 0){
-					c.print_client_port();
-				}else if(strcmp(command, "AUTHOR") == 0){
-					c.print_client_author();
-				}else if(strcmp(command, "REFRESH") == 0){
-					c.refresh();
-					cse4589_print_and_log("[%s:END]\n", command);
-				}else if(strcmp(command, "LIST") == 0){ 
-					c.print_client_list();
-					cse4589_print_and_log("[%s:END]\n", command);
-				}else if(strncmp(command, "LOGIN", 5) == 0){
-					char* token =  strtok(command, " "); 
-					char command_str[100];
-					char server_ip_address[100];
-					char port[6];
-					if (token != nullptr) {
-						strcpy(command_str, token);
-						token = strtok(nullptr, " "); 
-						if (token != nullptr) {
-							strcpy(server_ip_address, token);
-							token = strtok(nullptr, " ");
-							if (token != nullptr) {
-								strcpy(port, token);
-							}
-						}
-					}
-					try{
-						if(!is_valid_ip_address(server_ip_address)){
-							//throw exception when IP address is in invalid format
-							throw invalid_argument("Invalid IP address");
-						}
-						if(!is_valid_port(port)){
-							//throw exception when port number is invalid
-							throw invalid_argument("Invalid port number");
-						}
-						//send login request to the server
-						c.login(server_ip_address, atoi(port));
-						cse4589_print_and_log("[%s:END]\n", command);
-					}catch(const invalid_argument& exception){
-						cse4589_print_and_log("[%s:ERROR]\n", command_str);
-						cse4589_print_and_log("[%s:END]\n", command_str);
-					}
-				}
-			}
 		}
 		else{
 			cout << "Invalid input! Please enter the valid input" << endl;
@@ -617,52 +1186,48 @@ int main(int argc, char** argv)
 	return 0;
 }
 
-bool is_valid_ip_address(char* ip_address) {
-	char* address = new char[strlen(ip_address) + 1];
-	address = strcpy(address, ip_address);
-    int num, dots = 0;
+bool is_valid_ip_address(const string& ip_address) {
+	//cout << "Inside ip validation: " << ip_address << endl;
+    vector<char> address(ip_address.begin(), ip_address.end());
+    address.push_back('\0'); // Ensure null-termination
+     int num, dots = 0;
     char* ptr;
-    if (address == nullptr) {
-        return false;
-    }
-    ptr = strtok(address, ".");
+    ptr = strtok(address.data(), ".");
     if (ptr == nullptr) {
         return false;
     }
     while (ptr) {
-        // check if the current segment is a valid number
-        if (!isdigit(*ptr)) return false; 
-        num = atoi(ptr); // convert segment to integer
+        if (!isdigit(*ptr)) return false; // Ensure all characters are digits
+        num = atoi(ptr); // Convert segment to integer
         if (num >= 0 && num <= 255) {
-            // valid segment, move to the next one
             ptr = strtok(nullptr, ".");
-            if (ptr != nullptr) dots++; // count the dots
+            if (ptr != nullptr) dots++; // Count the dots
         } else {
-            // segment is not a valid number
-            return false;
+            return false; // Segment is not a valid number
         }
     }
-    //IPv4 address must have three dots which means 4 segments
-    if (dots != 3) {
+    if (dots != 3) { // IPv4 address must have three dots (which means 4 segments)
         return false;
     }
-	address = nullptr;
     return true;
 }
 
-bool is_valid_port(char *port) {
-    if (port == nullptr || *port == '\0') {
+
+bool is_valid_port(const string& port) {
+    if (port.empty()) {
         return false;
     }
     char *endptr;
-    long port_num = strtol(port, &endptr, 10); 
-    // check for conversion errors and validate the range
+    long port_num = strtol(port.c_str(), &endptr, 10);
+	//check if port is not in valid format
     if (*endptr != '\0' || port_num < 0 || port_num > 65535) {
-        return false; 
-    }
-    // check if the port string starts with a non-digit character
-    if (!isdigit(*port)) {
         return false;
     }
+
+    // Check if the port string starts with a non-digit character
+    if (!isdigit(port[0])) {
+        return false;
+    }
+
     return true;
 }
